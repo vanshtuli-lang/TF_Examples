@@ -84,6 +84,19 @@ variable "airflow_env" {
   }
 }
 
+variable "users" {
+  description = "Airflow UI/API users: username => role (viewer, user, op, admin). Passwords are generated and stored in SSM; see the user_password_commands output."
+  type        = map(string)
+  default     = { admin = "admin" }
+
+  validation {
+    condition = length(var.users) > 0 && alltrue([
+      for u, r in var.users : can(regex("^[a-z][a-z0-9_]*$", u)) && contains(["viewer", "user", "op", "admin"], r)
+    ])
+    error_message = "users must map lowercase names (letters, digits, _) to one of: viewer, user, op, admin."
+  }
+}
+
 # ---------------------------------------------------------------- optional pieces
 
 variable "create_efs" {

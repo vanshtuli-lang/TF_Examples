@@ -4,8 +4,9 @@
 #   2. mount EFS at /opt/airflow (if enabled)
 #   3. write /etc/airflow/airflow.env: settings below + secrets read from SSM
 #   4. pull the Airflow image
-#   5. start Airflow as systemd services: db migrate, then api-server,
-#      scheduler, dag-processor, triggerer
+#   5. check the database, then start Airflow as systemd services: db migrate,
+#      then api-server, scheduler, dag-processor, triggerer (with health checks)
+#   6. confirm the API answers and every service stays up
 # This file holds no secrets. Log: /var/log/airflow-bootstrap.log
 # Safe to re-run on the instance: sudo bash /var/lib/cloud/instance/scripts/part-001
 set -euo pipefail
@@ -42,6 +43,13 @@ fi
 if [ "$RUNTIME" = docker ]; then systemctl enable --now docker; fi
 RT=$(command -v "$RUNTIME")
 "$RT" --version
+if [ "$RUNTIME" = podman ]; then
+  # 4.6 added --health-on-failure, which restarts a hung component.
+  PODMAN_VERSION=$(podman version --format '{{.Client.Version}}')
+  if [ "$(printf '%s\n' 4.6.0 "$PODMAN_VERSION" | sort -V | head -n1)" != 4.6.0 ]; then
+    die "podman $PODMAN_VERSION is too old: 4.6 or newer is required"
+  fi
+fi
 
 # Amazon Linux ships the AWS CLI; RHEL does not.
 if ! command -v aws > /dev/null 2>&1; then
@@ -67,10 +75,10 @@ for _ in $(seq 1 30); do
   mount "$BASE" || sleep 10
 done
 mountpoint -q "$BASE" || die "could not mount EFS at $BASE"
-Z=''
+SELINUX_LABEL=''
 %{ else ~}
 # Local disk: let the runtime apply the SELinux label (:z).
-Z=',z'
+SELINUX_LABEL=z
 %{ endif ~}
 mkdir -p "$BASE/dags" "$BASE/logs" "$BASE/config"
 chmod 0755 "$BASE" "$BASE/dags"
@@ -98,7 +106,16 @@ aws ssm get-parameters-by-path --region "$REGION" --path '${ssm_env_path}' --rec
 grep -q '^AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=' "$ETC/airflow.env" || die "no database secret found under ${ssm_env_path}"
 chmod 0600 "$ETC/airflow.env"
 
-ADMIN_PASSWORD=$(aws ssm get-parameter --region "$REGION" --name '${ssm_admin}' --with-decryption --query Parameter.Value --output text)
+# UI users' passwords: one SecureString per user under ${ssm_users_path}/.
+PASSWORDS='{'
+SEP=''
+while IFS=$'\t' read -r name value; do
+  PASSWORDS="$PASSWORDS$SEP\"$${name##*/}\": \"$value\""
+  SEP=', '
+done < <(aws ssm get-parameters-by-path --region "$REGION" --path '${ssm_users_path}' --with-decryption \
+  --query 'Parameters[].[Name,Value]' --output text)
+PASSWORDS="$PASSWORDS}"
+[ -n "$SEP" ] || die "no user passwords found under ${ssm_users_path}"
 
 # ------------------------------------------------------------------ 4. image
 
@@ -117,22 +134,32 @@ done
 AF_UID=$("$RT" run --rm --network none --entrypoint python "$IMAGE" -c 'import os; print(os.getuid())' | tail -n1)
 case "$AF_UID" in '' | *[!0-9]*) die "could not read the container user ID from $IMAGE" ;; esac
 chown "$AF_UID:0" "$BASE/logs" "$BASE/config"
-printf '{"admin": "%s"}' "$ADMIN_PASSWORD" > "$BASE/config/passwords.json"
+printf '%s' "$PASSWORDS" > "$BASE/config/passwords.json"
 chown "$AF_UID:0" "$BASE/config/passwords.json"
 chmod 0600 "$BASE/config/passwords.json"
 
-# ------------------------------------------------------------------ 5. systemd services
+# ------------------------------------------------------------------ 5. database check and systemd services
+
+# Fail fast with a clear message when RDS is unreachable or the credentials are
+# wrong. Bypasses the image entrypoint, which would otherwise wait forever.
+log "checking the database connection"
+if ! timeout 300 "$RT" run --rm --network host --env-file "$ETC/airflow.env" --entrypoint airflow "$IMAGE" db check --retry 12 --retry-delay 5; then
+  die "cannot connect to the metadata database. Check the RDS endpoint, security groups and the SSM secret from this instance"
+fi
+
+# Each service calls airflow-run, which holds the container options and health checks.
+umask 022
+printf 'RUNTIME=%s\nIMAGE=%s\nSELINUX_LABEL=%s\n' "$RT" "$IMAGE" "$SELINUX_LABEL" > "$ETC/run.conf"
+cat > /usr/local/bin/airflow-run << 'AIRFLOW_RUN'
+${airflow_run}AIRFLOW_RUN
+chmod 0755 /usr/local/bin/airflow-run
 
 DEP=''
 if [ "$RUNTIME" = docker ]; then DEP='docker.service'; fi
-RUN="$RT run --rm --network host --env-file $ETC/airflow.env \
--v $BASE/dags:/usr/local/airflow/dags:ro$Z \
--v $BASE/logs:/usr/local/airflow/logs$${Z/,/:} \
--v $BASE/config:/usr/local/airflow/config$${Z/,/:}"
 
-# write_unit NAME COMMAND [oneshot]
+# write_unit COMPONENT [oneshot]
 write_unit() {
-  local name=airflow-$1 cmd=$2 after=$DEP
+  local name=airflow-$1 after=$DEP
   if [ "$1" != db-migrate ]; then after="$after airflow-db-migrate.service"; fi
   {
     echo "# Written by the Airflow bootstrap (EC2 user data). Re-running it overwrites this file."
@@ -143,29 +170,25 @@ write_unit() {
     echo "Requires=$after"
     echo ""
     echo "[Service]"
-    if [ "$${3:-}" = oneshot ]; then
+    if [ "$${2:-}" = oneshot ]; then
       echo "Type=oneshot"
       echo "RemainAfterExit=yes"
       echo "TimeoutStartSec=1800"
     else
       echo "Restart=always"
       echo "RestartSec=10"
+      echo "ExecStop=-$RT stop -t 60 $name"
     fi
     echo "ExecStartPre=-$RT rm -f $name"
-    echo "ExecStart=$RUN --name $name $IMAGE $cmd"
-    if [ "$${3:-}" != oneshot ]; then echo "ExecStop=-$RT stop -t 60 $name"; fi
+    echo "ExecStart=/usr/local/bin/airflow-run $1"
     echo ""
     echo "[Install]"
     echo "WantedBy=multi-user.target"
   } > "/etc/systemd/system/$name.service"
-  chmod 0644 "/etc/systemd/system/$name.service"
 }
 
-write_unit db-migrate "airflow db migrate" oneshot
-write_unit api-server "airflow api-server --port 8080"
-write_unit scheduler "airflow scheduler"
-write_unit dag-processor "airflow dag-processor"
-write_unit triggerer "airflow triggerer"
+write_unit db-migrate oneshot
+for c in $COMPONENTS; do write_unit "$c"; done
 systemctl daemon-reload
 
 log "migrating the database"
@@ -178,13 +201,25 @@ for c in $COMPONENTS; do
   systemctl restart "airflow-$c"
 done
 
+# ------------------------------------------------------------------ 6. verify
+
 log "waiting for the API server"
+API_OK=0
 for _ in $(seq 1 60); do
-  if curl -fsS http://127.0.0.1:8080/api/v2/monitor/health > /dev/null 2>&1; then
-    log "Airflow is up"
-    systemctl --no-pager --lines=0 status airflow-api-server airflow-scheduler airflow-dag-processor airflow-triggerer || true
-    exit 0
-  fi
+  if curl -fsS http://127.0.0.1:8080/api/v2/monitor/health > /dev/null 2>&1; then API_OK=1; break; fi
   sleep 5
 done
-die "API server not healthy after 5 minutes: journalctl -u airflow-api-server"
+[ "$API_OK" = 1 ] || die "API server not healthy after 5 minutes: journalctl -u airflow-api-server"
+
+# Catch components that start, then crash on config, DAG or database errors.
+sleep 20
+FAILED=''
+for c in $COMPONENTS; do
+  if ! systemctl is-active --quiet "airflow-$c"; then
+    journalctl -u "airflow-$c" -n 40 --no-pager || true
+    FAILED="$FAILED airflow-$c"
+  fi
+done
+[ -z "$FAILED" ] || die "not running:$FAILED"
+systemctl --no-pager --lines=0 status airflow-api-server airflow-scheduler airflow-dag-processor airflow-triggerer || true
+log "Airflow is up"

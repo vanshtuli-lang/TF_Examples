@@ -1,0 +1,3 @@
+# OS packages, one per line. Chainguard images use Wolfi (apk) package names,
+# not Debian names, and have no curl or id at run time: add what your
+# BashOperators call, e.g. curl.

@@ -25,7 +25,8 @@ locals {
   # Secrets live in SSM Parameter Store, never in user data. The instance reads
   # every parameter under this path at boot and writes it to its env file, so
   # any extra secret Airflow setting (e.g. AIRFLOW_CONN_MY_DB) can be added here.
-  ssm_env_path = "/${var.name}/env"
+  ssm_env_path   = "/${var.name}/env"
+  ssm_users_path = "/${var.name}/users"
 
   secret_env = {
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN = "postgresql+psycopg2://airflow:${random_password.db.result}@${aws_db_instance.airflow.address}:5432/airflow"
@@ -44,7 +45,9 @@ resource "random_password" "db" {
   special = false
 }
 
-resource "random_password" "admin" {
+resource "random_password" "user" {
+  for_each = var.users
+
   length  = 24
   special = false
 }
@@ -72,8 +75,11 @@ resource "aws_ssm_parameter" "env" {
   value = each.value
 }
 
-resource "aws_ssm_parameter" "admin_password" {
-  name  = "/${var.name}/admin-password"
+# One password per UI user, read by the instance into Airflow's password file.
+resource "aws_ssm_parameter" "user_password" {
+  for_each = var.users
+
+  name  = "${local.ssm_users_path}/${each.key}"
   type  = "SecureString"
-  value = random_password.admin.result
+  value = random_password.user[each.key].result
 }

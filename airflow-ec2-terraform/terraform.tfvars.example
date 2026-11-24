@@ -39,3 +39,9 @@ db_instance_class = "db.t4g.medium"
 airflow_env = {
   AIRFLOW__CORE__PARALLELISM = "32"
 }
+
+# UI users: name => role (viewer, user, op, admin). Passwords are generated into SSM.
+users = {
+  admin   = "admin"
+  analyst = "viewer"
+}
