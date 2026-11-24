@@ -3,9 +3,11 @@ output "airflow_url" {
   value       = local.airflow_url
 }
 
-output "admin_password_command" {
-  description = "Prints the password for the 'admin' user."
-  value       = "aws ssm get-parameter --region ${var.aws_region} --name ${aws_ssm_parameter.admin_password.name} --with-decryption --query Parameter.Value --output text"
+output "user_password_commands" {
+  description = "Per UI user, the command that prints their password. Run one with: $(terraform output -json user_password_commands | jq -r .admin)"
+  value = {
+    for u, p in aws_ssm_parameter.user_password : u => "aws ssm get-parameter --region ${var.aws_region} --name ${p.name} --with-decryption --query Parameter.Value --output text"
+  }
 }
 
 output "connect_command" {

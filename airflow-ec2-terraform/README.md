@@ -13,16 +13,23 @@ users ──► load balancer (optional, 80/443) ──► EC2 :8080 ──► R
                                                 │
                                                 └──► EFS at /opt/airflow (optional): dags/, logs/
 
-EC2 (RHEL 9), each Airflow component is a container run by a systemd service:
+EC2 (RHEL 9), each Airflow component is a container run by a systemd service
+(through /usr/local/bin/airflow-run, which holds the container options):
   airflow-db-migrate      runs "airflow db migrate" once per boot, before the others
   airflow-api-server      UI and REST API on port 8080
   airflow-scheduler       LocalExecutor: tasks run inside this container
   airflow-dag-processor   parses DAG files
   airflow-triggerer       deferrable operators
 
-Secrets (DB connection, Fernet key, JWT secret, admin password) are SSM Parameter Store
+Secrets (DB connection, Fernet key, JWT secret, UI user passwords) are SSM Parameter Store
 SecureStrings. The instance reads them at boot into /etc/airflow/airflow.env (root, 0600).
 ```
+
+**Built to fail loudly and recover on its own:**
+- Before migrating, the bootstrap runs `airflow db check`. A wrong RDS endpoint, password or security group fails within a few minutes with a clear message, where the image would otherwise wait forever.
+- Each component has a health check: the API health URL for the api-server, and `airflow jobs check --local` for the scheduler, DAG processor and triggerer. With **Podman**, a component that hangs is killed and systemd restarts it. With **Docker**, it is only marked `unhealthy` in `docker ps` (Docker can't act on health checks by itself). A component that exits is restarted after 10 s with either runtime.
+- After start, the bootstrap waits for the API and checks that every service is still running about 20 seconds later, so a crash at startup shows up in the bootstrap log, not later in the UI.
+- With Podman, it checks for version 4.6 or newer (needed for restart-on-unhealthy).
 
 **Deliberately left out** to keep the first setup small:
 
@@ -67,8 +74,10 @@ First boot takes about 5–10 minutes (packages, image pull, database migration)
 
 ```bash
 terraform output airflow_url
-$(terraform output -raw admin_password_command)    # password for user "admin"
+terraform output -json user_password_commands   # one command per user; run it to print the password
 ```
+
+Users and roles come from `users` (default: one `admin`). Passwords are generated and stored in SSM under `/<name>/users/`.
 
 No load balancer (`create_load_balancer = false`)? Forward the UI to your laptop and open http://localhost:8080:
 
@@ -85,6 +94,8 @@ systemctl status 'airflow-*' --no-pager
 ```
 
 All four services (`api-server`, `scheduler`, `dag-processor`, `triggerer`) should be `active (running)`, and `airflow-db-migrate` `active (exited)`.
+
+To prove the scheduler, DAG processor and task execution work end to end, copy [`examples/astro-project/dags/smoke_test.py`](examples/astro-project/dags/smoke_test.py) into `/opt/airflow/dags`, wait for it to appear in the UI, and trigger it.
 
 ## Safe re-runs
 
@@ -109,15 +120,25 @@ Run these on the instance (`$(terraform output -raw connect_command)`, then `sud
 | Change an Airflow setting | Add it to `airflow_env` in `terraform.tfvars`, `terraform apply`, then replace the instance (see "Safe re-runs"). For a quick test, edit `/etc/airflow/airflow.env` and restart the services. |
 | Add a secret setting or a connection | Add an SSM SecureString named `/<name>/env/<VARIABLE>`, e.g. `/airflow-dev/env/AIRFLOW_CONN_WAREHOUSE` (an `aws_ssm_parameter` resource in Terraform). Then re-run the bootstrap: `bash /var/lib/cloud/instance/scripts/part-001`. |
 | Upgrade the image | Change `airflow_image`, `terraform apply`, then `terraform apply -replace=aws_instance.airflow`. |
-| Add Python packages / providers | Build your own image `FROM` the Runtime image with a `requirements.txt`, push it through your scanning pipeline, and set `airflow_image`. |
+| Add Python packages / providers | Start from [`examples/astro-project/`](examples/astro-project/): add them to `requirements.txt` (OS packages to `packages.txt`), build the image in your pipeline, scan and push it, and set `airflow_image`. |
+| Add or remove a UI user | Edit `users`, `terraform apply` (creates the SSM password), then replace the instance. |
+| See component health | `podman ps` (or `docker ps`): the STATUS column shows `healthy` / `unhealthy`. |
+
+## Things to know
+
+- **Chainguard images** take Wolfi (apk) package names in `packages.txt`, not Debian names. They have no `curl` or `id` at run time, so add whatever your BashOperators call to `packages.txt`.
+- **Behind a corporate proxy**, the running containers don't inherit the host's proxy settings. If DAGs need one, set `HTTPS_PROXY` and `NO_PROXY` in `airflow_env`; `NO_PROXY` must include `127.0.0.1,localhost` so the Execution API calls stay local.
+- **Task logs** are on EFS (`/opt/airflow/logs`). For logs that outlive EFS or need central search, configure remote logging to S3 through `airflow_env` (`AIRFLOW__LOGGING__REMOTE_LOGGING`, `AIRFLOW__LOGGING__REMOTE_BASE_LOG_FOLDER`, ...), with the Amazon provider in the image and S3 access added to the instance role.
+- **Login** uses Airflow's SimpleAuthManager (users and passwords from `users`). The FAB auth manager isn't in the Runtime image, so SSO/LDAP needs extra work.
 
 ## Troubleshooting
 
 | Symptom | Where to look |
 |---|---|
 | UI not reachable, load balancer target unhealthy | Normal for the first ~10 minutes. Then `/var/log/airflow-bootstrap.log`, and `journalctl -u airflow-api-server`. |
-| Bootstrap failed | `/var/log/airflow-bootstrap.log` shows the step (package install, EFS mount, SSM read, image pull, db migrate). Fix the cause and re-run `bash /var/lib/cloud/instance/scripts/part-001`. |
-| A component keeps exiting (e.g. the DAG processor) | `journalctl -u airflow-dag-processor -n 200`. systemd restarts it after 10 s, so the log shows each crash. Common causes: a DAG file that fails to import, missing Python packages in the image, database connection limits. |
+| Bootstrap failed | `/var/log/airflow-bootstrap.log` shows the step (package install, EFS mount, SSM read, image pull, database check, db migrate, or a service that crashed after start). Fix the cause and re-run `bash /var/lib/cloud/instance/scripts/part-001`. |
+| "cannot connect to the metadata database" | From the instance, RDS isn't reachable or the credentials are wrong. Check the RDS security group allows the instance, and the `/<name>/env/AIRFLOW__DATABASE__SQL_ALCHEMY_CONN` parameter. |
+| A component keeps exiting or restarting (e.g. the DAG processor) | `journalctl -u airflow-dag-processor -n 200`. Each crash or health-check kill is in the log. Common causes: a DAG file that fails to import, missing Python packages in the image, database connection limits. |
 | DAGs don't appear | Files must be in `/opt/airflow/dags` and readable; check `journalctl -u airflow-dag-processor` for import errors. |
 | Can't open a Session Manager shell | The instance needs outbound access to the SSM endpoints, and your account must allow Session Manager. |
 
@@ -137,10 +158,12 @@ This deletes the database and EFS (DAGs, logs). Take an RDS snapshot first if yo
 | `variables.tf` | Inputs, with defaults |
 | `main.tf` | AMI lookup, generated secrets, SSM parameters |
 | `ec2.tf` | Instance and its IAM role (Session Manager, ECR pull, read own SSM path) |
-| `user_data.sh.tftpl` | First-boot bootstrap: runtime, EFS, secrets, image, systemd services |
+| `user_data.sh.tftpl` | First-boot bootstrap: runtime, EFS, secrets, image, database check, systemd services, verification |
+| `files/airflow-run.sh` | Installed as `/usr/local/bin/airflow-run`: runs one component's container, with its health check |
+| `examples/astro-project/` | Minimal Astro project to build your image from, with a smoke-test DAG |
 | `rds.tf` | PostgreSQL metadata database |
 | `efs.tf` | Optional EFS for DAGs and logs |
 | `alb.tf` | Optional load balancer |
 | `network.tf` | Security groups (no inbound SSH) |
-| `outputs.tf` | URL, admin password command, Session Manager commands |
+| `outputs.tf` | URL, user password commands, Session Manager commands |
 | `terraform.tfvars.example` | Example inputs |

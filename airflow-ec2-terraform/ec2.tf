@@ -66,19 +66,20 @@ resource "aws_instance" "airflow" {
   }
 
   user_data_base64 = base64gzip(templatefile("${path.module}/user_data.sh.tftpl", {
-    region       = var.aws_region
-    runtime      = var.container_runtime
-    image        = var.airflow_image
-    efs_dns      = var.create_efs ? "${aws_efs_file_system.airflow[0].id}.efs.${var.aws_region}.amazonaws.com" : ""
-    ssm_env_path = local.ssm_env_path
-    ssm_admin    = aws_ssm_parameter.admin_password.name
+    region         = var.aws_region
+    runtime        = var.container_runtime
+    image          = var.airflow_image
+    efs_dns        = var.create_efs ? "${aws_efs_file_system.airflow[0].id}.efs.${var.aws_region}.amazonaws.com" : ""
+    ssm_env_path   = local.ssm_env_path
+    ssm_users_path = local.ssm_users_path
+    airflow_run    = file("${path.module}/files/airflow-run.sh")
     airflow_env = merge(
       {
         AIRFLOW__CORE__EXECUTOR                           = "LocalExecutor"
         AIRFLOW__CORE__LOAD_EXAMPLES                      = "False"
         AIRFLOW__CORE__EXECUTION_API_SERVER_URL           = "http://127.0.0.1:8080/execution/"
         AIRFLOW__CORE__AUTH_MANAGER                       = "airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager"
-        AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS          = "admin:admin"
+        AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS          = join(",", [for u in sort(keys(var.users)) : "${u}:${var.users[u]}"])
         AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE = "/usr/local/airflow/config/passwords.json"
         AIRFLOW__API__BASE_URL                            = local.airflow_url
       },
@@ -98,5 +99,5 @@ resource "aws_instance" "airflow" {
     ignore_changes = [ami, user_data, user_data_base64]
   }
 
-  depends_on = [aws_efs_mount_target.airflow, aws_ssm_parameter.env]
+  depends_on = [aws_efs_mount_target.airflow, aws_ssm_parameter.env, aws_ssm_parameter.user_password]
 }

@@ -13,7 +13,7 @@ terraform {
   }
 
   # Keep state in an encrypted, access-controlled S3 bucket: it holds the
-  # generated database password, Fernet key and admin password.
+  # generated database password, Fernet key and UI user passwords.
   # backend "s3" {
   #   bucket       = "CHANGE-ME-terraform-state"
   #   key          = "airflow/dev/terraform.tfstate"

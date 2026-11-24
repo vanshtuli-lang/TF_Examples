@@ -1,0 +1,3 @@
+# Providers and Python packages your DAGs import, e.g.:
+# apache-airflow-providers-amazon
+# For a private index, add an --index-url line.
