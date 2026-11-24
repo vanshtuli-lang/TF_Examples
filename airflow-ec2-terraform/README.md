@@ -56,7 +56,7 @@ These are not settled. The repo picks a default for each so it can run, and each
 | Account, region, VPC, subnets | Placeholders | `terraform.tfvars` |
 | Terraform state, CI, IAM boundaries, logging | Local state | `versions.tf` has an S3 backend block. Add any required permission boundary or tags. |
 
-**Network needs.** The instance's private subnet must reach, through NAT or VPC endpoints: the OS package repos (Red Hat RHUI for RHEL; also `download.docker.com` for Docker on RHEL), the image registry, `awscli.amazonaws.com` (RHEL only, to install the AWS CLI), and the SSM, EC2 messages, ECR and RDS endpoints. If any of these are blocked, bake the packages into your AMI.
+**Network needs.** The instance's private subnet must reach, through NAT or VPC endpoints: the OS package repos (Red Hat RHUI for RHEL; also `download.docker.com` for Docker on RHEL), the image registry, `awscli.amazonaws.com` and `s3.<region>.amazonaws.com` (RHEL only, to install the AWS CLI and the SSM agent), and the SSM, SSM messages, EC2 messages, ECR and RDS endpoints. If any of these are blocked, bake the packages into your AMI.
 
 ## Deploy
 
@@ -79,7 +79,7 @@ terraform output -json user_password_commands   # one command per user; run it t
 
 Users and roles come from `users` (default: one `admin`). Passwords are generated and stored in SSM under `/<name>/users/`.
 
-No load balancer (`create_load_balancer = false`)? Forward the UI to your laptop and open http://localhost:8080:
+No load balancer (`create_load_balancer = false`)? Forward the UI to your laptop and open http://localhost:8085 (not 8080, which a local Airflow such as `astro dev start` often already uses):
 
 ```bash
 $(terraform output -raw port_forward_command)

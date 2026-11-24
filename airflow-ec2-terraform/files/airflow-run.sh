@@ -25,6 +25,10 @@ args=(
   -v "/opt/airflow/config:$home/config$label"
 )
 
+# systemd already sends the container's output to the journal. Keep podman's own
+# copy in a file (`podman logs` still works) instead of a second journal copy.
+if [ "${RUNTIME##*/}" = podman ]; then args+=(--log-driver k8s-file); fi
+
 health=''
 case "$c" in
   db-migrate) cmd=(airflow db migrate) ;;

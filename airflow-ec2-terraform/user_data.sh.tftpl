@@ -1,6 +1,7 @@
 #!/bin/bash
 # Airflow bootstrap. Rendered by Terraform and run once by cloud-init at first boot:
-#   1. install the container runtime (podman or docker), nfs-utils and the AWS CLI
+#   1. install the SSM agent (for Session Manager), the container runtime
+#      (podman or docker), nfs-utils and the AWS CLI
 #   2. mount EFS at /opt/airflow (if enabled)
 #   3. write /etc/airflow/airflow.env: settings below + secrets read from SSM
 #   4. pull the Airflow image
@@ -27,6 +28,15 @@ die() { log "ERROR: $*"; exit 1; }
 . /etc/os-release
 
 # ------------------------------------------------------------------ 1. packages
+
+# Session Manager (shell and port forwarding) needs the SSM agent. Amazon Linux
+# ships it; RHEL does not. Installed first, so you can get in even if a later
+# step fails. Source: AWS's regional S3 bucket for the agent.
+if ! rpm -q amazon-ssm-agent > /dev/null 2>&1; then
+  log "installing the SSM agent"
+  dnf install -y "https://s3.$REGION.amazonaws.com/amazon-ssm-$REGION/latest/linux_amd64/amazon-ssm-agent.rpm"
+fi
+systemctl enable --now amazon-ssm-agent
 
 log "installing packages on $PRETTY_NAME"
 dnf install -y nfs-utils unzip
