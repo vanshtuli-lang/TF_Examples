@@ -1,8 +1,10 @@
 # users -> ALB (80/443) -> EC2 (8080) -> RDS (5432)
 #                          EC2 -> EFS (2049)
-# Terraform runner (airflow-podman) -> EC2 (22)
+# No inbound SSH: shell access is through Session Manager.
 
 resource "aws_security_group" "alb" {
+  count = var.create_load_balancer ? 1 : 0
+
   name        = "${var.name}-alb"
   description = "Airflow load balancer"
   vpc_id      = var.vpc_id
@@ -36,23 +38,18 @@ resource "aws_security_group" "ec2" {
   description = "Airflow EC2 instance"
   vpc_id      = var.vpc_id
 
-  ingress {
-    description     = "Airflow UI/API from load balancer"
-    from_port       = 8080
-    to_port         = 8080
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]
+  dynamic "ingress" {
+    for_each = var.create_load_balancer ? [1] : []
+    content {
+      description     = "Airflow UI/API from the load balancer"
+      from_port       = 8080
+      to_port         = 8080
+      protocol        = "tcp"
+      security_groups = [aws_security_group.alb[0].id]
+    }
   }
 
-  ingress {
-    description = "SSH from the Terraform runner (airflow-podman)"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = var.ssh_allowed_cidrs
-  }
-
-  # Outbound: container registry, PyPI, AWS APIs.
+  # Outbound: package repos, container registry, AWS APIs (SSM), RDS, EFS.
   egress {
     from_port   = 0
     to_port     = 0
@@ -67,7 +64,7 @@ resource "aws_security_group" "rds" {
   vpc_id      = var.vpc_id
 
   ingress {
-    description     = "Postgres from Airflow EC2"
+    description     = "Postgres from the Airflow instance"
     from_port       = 5432
     to_port         = 5432
     protocol        = "tcp"
@@ -76,12 +73,14 @@ resource "aws_security_group" "rds" {
 }
 
 resource "aws_security_group" "efs" {
+  count = var.create_efs ? 1 : 0
+
   name        = "${var.name}-efs"
   description = "Airflow EFS"
   vpc_id      = var.vpc_id
 
   ingress {
-    description     = "NFS from Airflow EC2"
+    description     = "NFS from the Airflow instance"
     from_port       = 2049
     to_port         = 2049
     protocol        = "tcp"

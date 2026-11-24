@@ -1,91 +1,146 @@
-# Terraform: Airflow on VMs (Astro Runtime 3.4 Chainguard + Podman)
+# Airflow dev environment on EC2 (Terraform)
 
-Three Terraform stacks, applied in order. Each has its own state.
+One Terraform stack that builds an Airflow **development** environment on AWS: one EC2 instance running the Astro Runtime image, a PostgreSQL RDS database, optional EFS for DAGs and logs, and an optional load balancer for the UI.
 
-| Folder | Providers | What it does | Needed when |
-|---|---|---|---|
-| [`infra/`](infra/) | `hashicorp/aws`, `hashicorp/random` | EC2, EFS, PostgreSQL RDS, load balancer. User data only installs Podman and mounts EFS. | Only if you don't already have VMs, a database and a load balancer |
-| [`airflow-podman/`](airflow-podman/README.md) | `hashicorp/random` | Installs and runs Airflow on one or more VMs over SSH: image build, DAG sync, DB migration, every component as a systemd (quadlet) unit, upgrades, teardown | Always |
-| [`airflow-config/`](airflow-config/README.md) | `Mastercard/restapi`, `hashicorp/external` | Airflow connections, variables and pools through the REST API, with drift detection | Always |
+The instance sets itself up at first boot (EC2 user data): it installs Podman or Docker, pulls the image and starts Airflow as systemd services. There is no SSH step and no inbound port 22; use AWS Systems Manager (Session Manager) for a shell.
+
+It is a reference starting point, not an approved design. See [Decisions to confirm](#decisions-to-confirm-before-you-apply) before applying in a real account.
+
+## What you get
 
 ```
-infra (optional)            VMs, network, Postgres, load balancer
-   │  instance IP, sql_alchemy_conn, airflow_url
-   ▼
-airflow-podman              Airflow running, admin password in outputs
-   │  airflow_url, admin password
-   ▼
-airflow-config              connections, variables, pools
+users ──► load balancer (optional, 80/443) ──► EC2 :8080 ──► RDS PostgreSQL :5432
+                                                │
+                                                └──► EFS at /opt/airflow (optional): dags/, logs/
+
+EC2 (RHEL 9), each Airflow component is a container run by a systemd service:
+  airflow-db-migrate      runs "airflow db migrate" once per boot, before the others
+  airflow-api-server      UI and REST API on port 8080
+  airflow-scheduler       LocalExecutor: tasks run inside this container
+  airflow-dag-processor   parses DAG files
+  airflow-triggerer       deferrable operators
+
+Secrets (DB connection, Fernet key, JWT secret, admin password) are SSM Parameter Store
+SecureStrings. The instance reads them at boot into /etc/airflow/airflow.env (root, 0600).
 ```
 
-## Which tool configures what
+**Deliberately left out** to keep the first setup small:
 
-| Layer | Configured by | How changes reach it |
+| Not included | Why | When to add it |
 |---|---|---|
-| AWS resources | `infra/` (or your own Terraform) | `terraform apply` |
-| Podman on the VM | `infra/user_data.sh.tftpl` (first boot), or your VM image | Install Podman 4.6+ once; `airflow-podman` checks the version |
-| Airflow containers, image, DAGs, `airflow.cfg` settings | `airflow-podman/` over SSH | `terraform apply`: re-runs only the steps whose inputs changed, never replaces the VM |
-| Connections, variables, pools | `airflow-config/` | `terraform apply`: POST/PATCH/DELETE on `/api/v2` |
-| Airflow API token | `external` data source in `airflow-config/` | Fetched on every plan from `POST /auth/token` |
+| Redis, Celery workers | LocalExecutor needs only Postgres. Tasks run on the one instance. | If you outgrow one VM: switch to CeleryExecutor, add a broker (e.g. ElastiCache) and worker instances. |
+| Flower | It only monitors Celery workers, so it does nothing with LocalExecutor. | Together with CeleryExecutor. |
+| SSH-based deploys, auto-scaling, multiple instances | One dev instance doesn't need them. | UAT/prod. |
+| Connections/variables as Terraform resources | Airflow reads `AIRFLOW_CONN_*` / `AIRFLOW_VAR_*` environment variables, which this stack already supports through SSM (see [Day-to-day](#day-to-day)). | If you want drift detection on them. |
 
-## Before you start
+## Decisions to confirm before you apply
 
-- Terraform 1.5+ and `python3` where Terraform runs.
-- SSH from where Terraform runs to every VM (port 22, directly or through a bastion), as a user with passwordless `sudo`.
-- VMs: Linux with systemd and Podman 4.6+ with quadlet. Outbound access to `quay.io` (or your registry mirror) and PyPI.
-- Postgres 14–18 with an empty `airflow` database.
-- An Astro project (`Dockerfile`, `requirements.txt`, `packages.txt`, `dags/`). `airflow-podman/examples/astro-project` is a minimal one.
+These are not settled. The repo picks a default for each so it can run, and each is one setting to change.
 
-## Step 1 (optional): AWS infrastructure (`infra/`)
+| Decision | Default here | Change with |
+|---|---|---|
+| OS / AMI | Latest RHEL 9 from Red Hat | `ami_id` (e.g. your hardened golden image). Amazon Linux 2023 works only with Docker: it has no podman package. |
+| Container runtime: Podman or Docker | Podman | `container_runtime = "docker"` |
+| Image and registry (security scanning: JFrog / Quay / Harness?) | `quay.io/astronomer/astro-runtime:3.4-1-chainguard` | `airflow_image`. Use the scanned internal copy, pinned by digest (`...@sha256:...`). ECR login is automatic; other private registries need a login step added to `user_data.sh.tftpl`. Confirm approval for the image actually deployed: earlier approval was for open-source Airflow on EC2. |
+| Executor | LocalExecutor (no Redis) | See "Deliberately left out" |
+| RDS | PostgreSQL 16, `db.t4g.medium`, 50 GB, single-AZ, 7-day backups, deletion protection on | `db_*` variables, `rds.tf` |
+| EFS | On | `create_efs = false` puts `/opt/airflow` on the root disk (lost if the instance is replaced) |
+| Load balancer / URL | On, internal, HTTP | `create_load_balancer`, `alb_internal`, `certificate_arn` (HTTPS), `hostname` |
+| Account, region, VPC, subnets | Placeholders | `terraform.tfvars` |
+| Terraform state, CI, IAM boundaries, logging | Local state | `versions.tf` has an S3 backend block. Add any required permission boundary or tags. |
 
-```bash
-cd infra
-cp terraform.tfvars.example terraform.tfvars   # vpc_id, subnets, allowed_cidrs, key_name, ssh_allowed_cidrs
-terraform init && terraform apply
-terraform output -raw airflow_podman_tfvars    # paste into ../airflow-podman/terraform.tfvars
-export TF_VAR_sql_alchemy_conn="$(terraform output -raw sql_alchemy_conn)"
-```
+**Network needs.** The instance's private subnet must reach, through NAT or VPC endpoints: the OS package repos (Red Hat RHUI for RHEL; also `download.docker.com` for Docker on RHEL), the image registry, `awscli.amazonaws.com` (RHEL only, to install the AWS CLI), and the SSM, EC2 messages, ECR and RDS endpoints. If any of these are blocked, bake the packages into your AMI.
 
-## Step 2: Airflow (`airflow-podman/`)
+## Deploy
 
-```bash
-cd ../airflow-podman
-cp examples/single-vm.tfvars.example terraform.tfvars   # or the output from step 1
-terraform init && terraform apply
-terraform output api_urls
-export AIRFLOW_PASSWORD="$(terraform output -json user_passwords | python3 -c 'import json,sys; print(json.load(sys.stdin)["admin"])')"
-```
-
-For several VMs and CeleryExecutor, start from `examples/multi-vm.tfvars.example`. See [airflow-podman/README.md](airflow-podman/README.md) for inputs, day-2 changes and what has been tested.
-
-## Step 3: connections, variables, pools (`airflow-config/`)
+Requirements where you run Terraform: Terraform 1.5+, AWS credentials for the account, and the AWS CLI with the [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html).
 
 ```bash
-cd ../airflow-config
-cp terraform.tfvars.example terraform.tfvars   # airflow_url, connections, variables, pools
-export TF_VAR_connection_secrets='{"warehouse": {"password": "..."}}'
-terraform init && terraform apply
+cd airflow-ec2-terraform
+cp terraform.tfvars.example terraform.tfvars   # fill in VPC, subnets, CIDRs, image
+terraform init
+terraform plan        # read it: see "Safe re-runs" below
+terraform apply
 ```
 
-See [airflow-config/README.md](airflow-config/README.md) for drift behaviour, importing existing objects and the restapi version pin.
+First boot takes about 5–10 minutes (packages, image pull, database migration). Then:
 
-## Everyday use
+```bash
+terraform output airflow_url
+$(terraform output -raw admin_password_command)    # password for user "admin"
+```
+
+No load balancer (`create_load_balancer = false`)? Forward the UI to your laptop and open http://localhost:8080:
+
+```bash
+$(terraform output -raw port_forward_command)
+```
+
+### Check it worked
+
+```bash
+$(terraform output -raw connect_command)      # shell on the instance
+sudo tail -n 50 /var/log/airflow-bootstrap.log # ends with "Airflow is up"
+systemctl status 'airflow-*' --no-pager
+```
+
+All four services (`api-server`, `scheduler`, `dag-processor`, `triggerer`) should be `active (running)`, and `airflow-db-migrate` `active (exited)`.
+
+## Safe re-runs
+
+- **`terraform apply` never replaces the instance on its own.** A new RHEL release, an edit to `user_data.sh.tftpl`, or a new `airflow_image` is ignored for the existing instance (`ignore_changes` in `ec2.tf`). This protects an instance you are debugging.
+- To roll out such a change, replace the instance on purpose. The database (RDS) and DAGs/logs (EFS) are kept:
+  ```bash
+  terraform apply -replace=aws_instance.airflow
+  ```
+- Always read the plan. If it says `must be replaced` or `destroy` for something you want to keep, stop.
+- This stack only manages resources it created. It does not touch an existing test instance (for example the one used for the DAG-processor investigation) unless you `terraform import` it, which you should not.
+
+## Day-to-day
+
+Run these on the instance (`$(terraform output -raw connect_command)`, then `sudo -i`).
 
 | I want to… | Do this |
 |---|---|
-| Deploy DAG changes | Change `dags/` in the project, `terraform apply` in `airflow-podman` (synced, no restart) |
-| Add a Python/OS package or upgrade the Runtime tag | Edit `requirements.txt` / `packages.txt` / `Dockerfile`, `terraform apply` in `airflow-podman` (rebuild, migrate, restart) |
-| Change an Airflow setting | `airflow_env` in `airflow-podman`, `terraform apply` |
-| Add or change connections, variables, pools | `airflow-config`, `terraform apply` |
-| Restart a component | On the VM: `sudo systemctl restart airflow-scheduler` |
-| See logs | `journalctl -u airflow-scheduler -f` |
-| Run an Airflow CLI command | `sudo podman exec -it airflow-scheduler airflow dags list` |
+| Add or update DAGs | Put files in `/opt/airflow/dags` (on EFS). For example `git clone <dag repo> /opt/airflow/dags` once, then `git -C /opt/airflow/dags pull`. No restart needed. |
+| See logs | `journalctl -u airflow-dag-processor -f` (any component). Task logs: `/opt/airflow/logs`. |
+| Restart a component | `systemctl restart airflow-scheduler` |
+| Run an Airflow CLI command | `podman exec -it airflow-scheduler airflow dags list` (or `docker exec`) |
+| Change an Airflow setting | Add it to `airflow_env` in `terraform.tfvars`, `terraform apply`, then replace the instance (see "Safe re-runs"). For a quick test, edit `/etc/airflow/airflow.env` and restart the services. |
+| Add a secret setting or a connection | Add an SSM SecureString named `/<name>/env/<VARIABLE>`, e.g. `/airflow-dev/env/AIRFLOW_CONN_WAREHOUSE` (an `aws_ssm_parameter` resource in Terraform). Then re-run the bootstrap: `bash /var/lib/cloud/instance/scripts/part-001`. |
+| Upgrade the image | Change `airflow_image`, `terraform apply`, then `terraform apply -replace=aws_instance.airflow`. |
+| Add Python packages / providers | Build your own image `FROM` the Runtime image with a `requirements.txt`, push it through your scanning pipeline, and set `airflow_image`. |
+
+## Troubleshooting
+
+| Symptom | Where to look |
+|---|---|
+| UI not reachable, load balancer target unhealthy | Normal for the first ~10 minutes. Then `/var/log/airflow-bootstrap.log`, and `journalctl -u airflow-api-server`. |
+| Bootstrap failed | `/var/log/airflow-bootstrap.log` shows the step (package install, EFS mount, SSM read, image pull, db migrate). Fix the cause and re-run `bash /var/lib/cloud/instance/scripts/part-001`. |
+| A component keeps exiting (e.g. the DAG processor) | `journalctl -u airflow-dag-processor -n 200`. systemd restarts it after 10 s, so the log shows each crash. Common causes: a DAG file that fails to import, missing Python packages in the image, database connection limits. |
+| DAGs don't appear | Files must be in `/opt/airflow/dags` and readable; check `journalctl -u airflow-dag-processor` for import errors. |
+| Can't open a Session Manager shell | The instance needs outbound access to the SSM endpoints, and your account must allow Session Manager. |
 
 ## Tear down
 
 ```bash
-cd airflow-config && terraform destroy
-cd ../airflow-podman && terraform destroy
-cd ../infra   # set db_deletion_protection = false, terraform apply, then:
+terraform apply -var db_deletion_protection=false   # unlock the database first
 terraform destroy
 ```
+
+This deletes the database and EFS (DAGs, logs). Take an RDS snapshot first if you need the data.
+
+## Files
+
+| File | What it is |
+|---|---|
+| `variables.tf` | Inputs, with defaults |
+| `main.tf` | AMI lookup, generated secrets, SSM parameters |
+| `ec2.tf` | Instance and its IAM role (Session Manager, ECR pull, read own SSM path) |
+| `user_data.sh.tftpl` | First-boot bootstrap: runtime, EFS, secrets, image, systemd services |
+| `rds.tf` | PostgreSQL metadata database |
+| `efs.tf` | Optional EFS for DAGs and logs |
+| `alb.tf` | Optional load balancer |
+| `network.tf` | Security groups (no inbound SSH) |
+| `outputs.tf` | URL, admin password command, Session Manager commands |
+| `terraform.tfvars.example` | Example inputs |

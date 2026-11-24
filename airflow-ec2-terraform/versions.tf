@@ -12,10 +12,12 @@ terraform {
     }
   }
 
-  # Recommended: keep state in S3. Uncomment and fill in.
+  # Keep state in an encrypted, access-controlled S3 bucket: it holds the
+  # generated database password, Fernet key and admin password.
   # backend "s3" {
   #   bucket       = "CHANGE-ME-terraform-state"
   #   key          = "airflow/dev/terraform.tfstate"
+  #   encrypt      = true
   #   region       = "us-east-1"
   #   use_lockfile = true
   # }

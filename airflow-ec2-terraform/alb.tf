@@ -1,15 +1,28 @@
-# Application Load Balancer in front of the Airflow API server (port 8080).
+# Optional Application Load Balancer in front of the Airflow UI/API (port 8080).
 
 resource "aws_lb" "airflow" {
+  count = var.create_load_balancer ? 1 : 0
+
   name               = "${var.name}-alb"
   load_balancer_type = "application"
   internal           = var.alb_internal
-  security_groups    = [aws_security_group.alb.id]
+  security_groups    = [aws_security_group.alb[0].id]
   subnets            = var.alb_subnet_ids
   idle_timeout       = 120
+
+  lifecycle {
+    precondition {
+      condition     = length(var.alb_subnet_ids) >= 2 && length(var.allowed_cidrs) > 0
+      error_message = "With create_load_balancer = true, set alb_subnet_ids (2+ subnets in different AZs) and allowed_cidrs."
+    }
+  }
 }
 
+# The target reports unhealthy for the first ~10 minutes after launch, while
+# the instance installs packages, pulls the image and migrates the database.
 resource "aws_lb_target_group" "airflow" {
+  count = var.create_load_balancer ? 1 : 0
+
   name     = "${var.name}-tg"
   port     = 8080
   protocol = "HTTP"
@@ -26,20 +39,24 @@ resource "aws_lb_target_group" "airflow" {
 }
 
 resource "aws_lb_target_group_attachment" "airflow" {
-  target_group_arn = aws_lb_target_group.airflow.arn
+  count = var.create_load_balancer ? 1 : 0
+
+  target_group_arn = aws_lb_target_group.airflow[0].arn
   target_id        = aws_instance.airflow.id
   port             = 8080
 }
 
 # HTTP: forwards to Airflow, or redirects to HTTPS when a certificate is set.
 resource "aws_lb_listener" "http" {
-  load_balancer_arn = aws_lb.airflow.arn
+  count = var.create_load_balancer ? 1 : 0
+
+  load_balancer_arn = aws_lb.airflow[0].arn
   port              = 80
   protocol          = "HTTP"
 
   default_action {
     type             = local.https ? "redirect" : "forward"
-    target_group_arn = local.https ? null : aws_lb_target_group.airflow.arn
+    target_group_arn = local.https ? null : aws_lb_target_group.airflow[0].arn
 
     dynamic "redirect" {
       for_each = local.https ? [1] : []
@@ -53,9 +70,9 @@ resource "aws_lb_listener" "http" {
 }
 
 resource "aws_lb_listener" "https" {
-  count = local.https ? 1 : 0
+  count = var.create_load_balancer && local.https ? 1 : 0
 
-  load_balancer_arn = aws_lb.airflow.arn
+  load_balancer_arn = aws_lb.airflow[0].arn
   port              = 443
   protocol          = "HTTPS"
   ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
@@ -63,21 +80,6 @@ resource "aws_lb_listener" "https" {
 
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.airflow.arn
-  }
-}
-
-# Optional friendly URL.
-resource "aws_route53_record" "airflow" {
-  count = var.route53_zone_id != null && var.hostname != null ? 1 : 0
-
-  zone_id = var.route53_zone_id
-  name    = var.hostname
-  type    = "A"
-
-  alias {
-    name                   = aws_lb.airflow.dns_name
-    zone_id                = aws_lb.airflow.zone_id
-    evaluate_target_health = false
+    target_group_arn = aws_lb_target_group.airflow[0].arn
   }
 }

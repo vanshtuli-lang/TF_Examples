@@ -1,1 +1,0 @@
-# Chainguard (Wolfi apk) package names, one per line.
