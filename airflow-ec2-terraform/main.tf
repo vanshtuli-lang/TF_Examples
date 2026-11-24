@@ -15,11 +15,12 @@ locals {
   https  = var.certificate_arn != null
 
   # The URL users open. Without a load balancer, that is a Session Manager
-  # port forward to localhost:8080 (see the port_forward_command output).
+  # port forward to localhost:8085 (see the port_forward_command output). 8085,
+  # not 8080, so it does not clash with a local Airflow (e.g. astro dev start).
   airflow_url = (
     var.hostname != null ? "${local.https ? "https" : "http"}://${var.hostname}" :
     var.create_load_balancer ? "${local.https ? "https" : "http"}://${aws_lb.airflow[0].dns_name}" :
-    "http://localhost:8080"
+    "http://localhost:8085"
   )
 
   # Secrets live in SSM Parameter Store, never in user data. The instance reads

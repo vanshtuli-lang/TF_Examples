@@ -16,8 +16,8 @@ output "connect_command" {
 }
 
 output "port_forward_command" {
-  description = "Forward localhost:8080 to the Airflow UI (Session Manager, no SSH or load balancer)."
-  value       = "aws ssm start-session --region ${var.aws_region} --target ${aws_instance.airflow.id} --document-name AWS-StartPortForwardingSession --parameters portNumber=8080,localPortNumber=8080"
+  description = "Forward localhost:8085 to the Airflow UI (port 8080 on the instance) (Session Manager, no SSH or load balancer)."
+  value       = "aws ssm start-session --region ${var.aws_region} --target ${aws_instance.airflow.id} --document-name AWS-StartPortForwardingSession --parameters portNumber=8080,localPortNumber=8085"
 }
 
 output "load_balancer_dns_name" {
