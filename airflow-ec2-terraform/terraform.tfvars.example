@@ -1,0 +1,41 @@
+# Copy to terraform.tfvars and replace the placeholder values.
+
+aws_region = "us-east-1"
+name       = "airflow-dev"
+
+tags = {
+  Environment = "dev"
+  Owner       = "data-platform"
+}
+
+# Existing VPC and private subnets (2+ AZs). The instance needs outbound access to
+# the package repos, the image registry and the SSM/EC2/RDS APIs (NAT or VPC endpoints).
+vpc_id             = "vpc-0123456789abcdef0"
+private_subnet_ids = ["subnet-0aaaaaaaaaaaaaaaa", "subnet-0bbbbbbbbbbbbbbbb"]
+
+# The image the instance pulls at boot. Prefer your scanned internal copy, pinned by digest.
+airflow_image     = "quay.io/astronomer/astro-runtime:3.4-1-chainguard"
+container_runtime = "podman" # or "docker"
+
+# Optional: a hardened company AMI instead of the latest RHEL 9.
+# ami_id = "ami-0123456789abcdef0"
+
+# Load balancer for the UI. Set create_load_balancer = false to use
+# Session Manager port forwarding instead (terraform output port_forward_command).
+create_load_balancer = true
+alb_subnet_ids       = ["subnet-0aaaaaaaaaaaaaaaa", "subnet-0bbbbbbbbbbbbbbbb"]
+allowed_cidrs        = ["10.0.0.0/8"]
+# certificate_arn    = "arn:aws:acm:us-east-1:111111111111:certificate/xxxx"
+# hostname           = "airflow-dev.example.com"
+
+# EFS for DAGs and logs (survive instance replacement).
+create_efs = true
+
+# Sizing
+instance_type     = "m7i.xlarge"
+db_instance_class = "db.t4g.medium"
+
+# Extra non-secret Airflow settings
+airflow_env = {
+  AIRFLOW__CORE__PARALLELISM = "32"
+}
