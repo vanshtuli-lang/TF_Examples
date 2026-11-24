@@ -36,7 +36,7 @@ output "airflow_podman_tfvars" {
       }
     }
     ssh = {
-      user             = "ec2-user"
+      user             = "ec2-user"   # default login user on the RHEL 9 AMI
       private_key_path = "~/.ssh/${var.key_name}.pem"
     }
     api_base_url = "${local.base_url}"

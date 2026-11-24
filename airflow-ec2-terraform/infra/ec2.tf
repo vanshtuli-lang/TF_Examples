@@ -1,5 +1,5 @@
-# Single EC2 instance for Astro Runtime (Chainguard) on Podman. User data only
-# installs Podman and mounts EFS; ../airflow-podman installs Airflow over SSH.
+# Single EC2 instance (RHEL 9) for Astro Runtime (Chainguard) on Podman. User data
+# only installs Podman and mounts EFS; ../airflow-podman installs Airflow over SSH.
 # Interactive shell access is also available through Session Manager.
 
 resource "aws_iam_role" "ec2" {
@@ -46,6 +46,7 @@ resource "aws_instance" "airflow" {
 
   user_data_base64 = base64gzip(templatefile("${path.module}/user_data.sh.tftpl", {
     efs_id = aws_efs_file_system.airflow.id
+    region = var.aws_region
   }))
   user_data_replace_on_change = true
 

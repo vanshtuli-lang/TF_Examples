@@ -4,7 +4,7 @@ Three Terraform stacks, applied in order. Each has its own state.
 
 | Folder | Providers | What it does | Needed when |
 |---|---|---|---|
-| [`infra/`](infra/) | `hashicorp/aws`, `hashicorp/random` | EC2, EFS, PostgreSQL RDS, load balancer. User data only installs Podman and mounts EFS. | Only if you don't already have VMs, a database and a load balancer |
+| [`infra/`](infra/) | `hashicorp/aws`, `hashicorp/random` | EC2 (RHEL 9), EFS, PostgreSQL RDS, load balancer. User data only installs Podman and mounts EFS over NFS. | Only if you don't already have VMs, a database and a load balancer |
 | [`airflow-podman/`](airflow-podman/README.md) | `hashicorp/random` | Installs and runs Airflow on one or more VMs over SSH: image build, DAG sync, DB migration, every component as a systemd (quadlet) unit, upgrades, teardown | Always |
 | [`airflow-config/`](airflow-config/README.md) | `Mastercard/restapi`, `hashicorp/external` | Airflow connections, variables and pools through the REST API, with drift detection | Always |
 
@@ -32,9 +32,17 @@ airflow-config              connections, variables, pools
 
 - Terraform 1.5+ and `python3` where Terraform runs.
 - SSH from where Terraform runs to every VM (port 22, directly or through a bastion), as a user with passwordless `sudo`.
-- VMs: Linux with systemd and Podman 4.6+ with quadlet. Outbound access to `quay.io` (or your registry mirror) and PyPI.
+- VMs: Linux with systemd and Podman 4.6+ with quadlet (see "Operating system" below). Outbound access to `quay.io` (or your registry mirror) and PyPI.
 - Postgres 14–18 with an empty `airflow` database.
 - An Astro project (`Dockerfile`, `requirements.txt`, `packages.txt`, `dags/`). `airflow-podman/examples/astro-project` is a minimal one.
+
+## Operating system
+
+`infra/` launches the latest **RHEL 9** AMI from Red Hat (owner `309956199498`). Its AppStream repo has podman 4.6+ with quadlet, and SELinux is enforcing; the EFS mount is labelled for containers. Override with `ami_id` (for example a hardened company image) as long as it is dnf-based and can install `podman` 4.6+ and `nfs-utils`. The default login user is `ec2-user`.
+
+**Amazon Linux 2023 is not supported.** Podman is not in the AL2023 repositories, so first boot fails before EFS is mounted, and `airflow-podman` then stops with "podman is not installed".
+
+EFS is mounted with the kernel NFS client (`nfs4`, `nfsvers=4.1`, AWS's recommended options) because RHEL has no `amazon-efs-utils` package. Traffic to EFS is not TLS-wrapped; the EFS security group only accepts NFS from the Airflow instance.
 
 ## Step 1 (optional): AWS infrastructure (`infra/`)
 

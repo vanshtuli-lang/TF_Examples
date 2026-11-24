@@ -71,7 +71,7 @@ variable "instance_type" {
 }
 
 variable "ami_id" {
-  description = "Optional AMI ID. Defaults to the latest Amazon Linux 2023 (x86_64)."
+  description = "Optional AMI ID. Defaults to the latest RHEL 9 (x86_64). An override must be a dnf-based image whose repos have podman 4.6+ with quadlet and nfs-utils (RHEL 9 AppStream qualifies; Amazon Linux 2023 does not)."
   type        = string
   default     = null
 }

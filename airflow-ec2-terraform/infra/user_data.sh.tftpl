@@ -3,18 +3,23 @@
 # Airflow itself is installed and updated by ../airflow-podman over SSH, so
 # this script carries no secrets and no Airflow settings, and changing Airflow
 # never replaces the instance. Log: /var/log/airflow-setup.log
+#
+# Needs a dnf-based OS with podman 4.6+ in its repos (RHEL 9 AppStream).
+# Amazon Linux 2023 has no podman package, so this script fails there.
 set -euxo pipefail
 exec > >(tee -a /var/log/airflow-setup.log) 2>&1
 
-dnf install -y podman amazon-efs-utils rsync
+dnf install -y podman nfs-utils rsync
 
+# RHEL has no amazon-efs-utils package: mount EFS with the kernel NFS client,
+# using the options AWS recommends for EFS.
 mkdir -p /opt/airflow
-MOUNT_OPTS="_netdev,noresvport,tls"
+MOUNT_OPTS="nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport,_netdev"
 # When SELinux is on, label EFS so containers can use it.
 if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled; then
   MOUNT_OPTS="$MOUNT_OPTS,context=system_u:object_r:container_file_t:s0"
 fi
-grep -q " /opt/airflow " /etc/fstab || echo "${efs_id}:/ /opt/airflow efs $MOUNT_OPTS 0 0" >> /etc/fstab
+grep -q " /opt/airflow " /etc/fstab || echo "${efs_id}.efs.${region}.amazonaws.com:/ /opt/airflow nfs4 $MOUNT_OPTS 0 0" >> /etc/fstab
 
 # EFS DNS can take a minute to become available after creation.
 for _ in $(seq 1 30); do

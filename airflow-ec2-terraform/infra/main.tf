@@ -1,9 +1,22 @@
-data "aws_ssm_parameter" "al2023" {
-  name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
+# Latest RHEL 9 from Red Hat. Its AppStream repo has podman 4.6+ with quadlet.
+# Amazon Linux 2023 is not supported: podman is not in its repositories.
+data "aws_ami" "rhel9" {
+  count       = var.ami_id == null ? 1 : 0
+  most_recent = true
+  owners      = ["309956199498"] # Red Hat
+
+  filter {
+    name   = "name"
+    values = ["RHEL-9.*_HVM-*-x86_64-*"]
+  }
+  filter {
+    name   = "architecture"
+    values = ["x86_64"]
+  }
 }
 
 locals {
-  ami_id   = coalesce(var.ami_id, data.aws_ssm_parameter.al2023.insecure_value)
+  ami_id   = var.ami_id != null ? var.ami_id : data.aws_ami.rhel9[0].id
   https    = var.certificate_arn != null
   host     = coalesce(var.hostname, aws_lb.airflow.dns_name)
   base_url = "${local.https ? "https" : "http"}://${local.host}"

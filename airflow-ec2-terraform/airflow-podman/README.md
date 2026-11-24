@@ -34,7 +34,7 @@ Every unit restarts on failure, starts at boot, and has a health check. A failin
 | Where | What |
 |---|---|
 | Terraform runner | Terraform 1.5+, SSH access to every VM (directly or through `ssh.bastion_host`) |
-| Each VM | Linux with systemd, podman 4.6+ with quadlet, passwordless `sudo` for the SSH user (or SSH as root), `base64`, `sha256sum`, `timeout` |
+| Each VM | Linux with systemd, podman 4.6+ with quadlet (e.g. RHEL 9; Amazon Linux 2023 has no podman package), passwordless `sudo` for the SSH user (or SSH as root), `base64`, `sha256sum`, `timeout` |
 | Each VM, network | Pull access to the Runtime image registry (quay.io, astrocrpublic.azurecr.io, or your mirror). With `project_dir`, the build also needs PyPI (or your index) for `requirements.txt` and the Chainguard apk repo for `packages.txt` |
 | Database | Postgres 14–18 reachable from every Airflow VM, with an empty database for Airflow. The bundled Postgres container is for dev/test only |
 
@@ -45,7 +45,7 @@ Astro Runtime `3.4-1-chainguard` (Airflow 3.4.0), podman 5.x, SELinux enforcing:
 - **One VM:** install, re-apply with no changes, DAG-only change, `airflow_env` change, Dockerfile rebuild and rollout, recovery after a container is killed, switching between LocalExecutor and CeleryExecutor, unreachable database (fails in about a minute with a clear error), destroy.
 - **Three VMs, CeleryExecutor:** podman installed by the module, workers on different queues, task logs read across hosts, cold restart of the database host, moving components between hosts, removing a host, destroy.
 
-Not yet covered: Amazon Linux 2023, RHEL itself (tested on its rebuild, AlmaLinux 10), x86_64, prebuilt `image` mode, `registry_auth`, `build_netrc`, a bastion host, external Postgres or Redis.
+Not yet covered: RHEL itself (tested on its rebuild, AlmaLinux 10), x86_64, prebuilt `image` mode, `registry_auth`, `build_netrc`, a bastion host, external Postgres or Redis.
 
 ### Things to know
 
